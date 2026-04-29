@@ -1,0 +1,117 @@
+name: Deploy to Production
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or commit SHA to deploy'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: clasp push + deploy → production
+    runs-on: ubuntu-latest
+    environment: production    # GitHub environment with required reviewers
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run quality gates
+        run: npm run ci
+
+      - name: Authenticate clasp
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::error::CLASPRC_JSON secret is not set"
+            exit 1
+          fi
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: Configure clasp project for production
+        env:
+          SCRIPT_ID: ${{ secrets.SCRIPT_ID_PROD }}
+        run: |
+          if [ -z "$SCRIPT_ID" ]; then
+            echo "::error::SCRIPT_ID_PROD secret is not set"
+            exit 1
+          fi
+          cat > .clasp.json <<EOF
+          {
+            "scriptId": "$SCRIPT_ID",
+            "rootDir": "./src"
+          }
+          EOF
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.ref }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Push source to production
+        run: npx clasp push -f
+
+      - name: Tag a new version
+        id: version
+        run: |
+          OUTPUT=$(npx clasp version "${{ steps.tag.outputs.tag }}")
+          echo "$OUTPUT"
+          VERSION_NUMBER=$(echo "$OUTPUT" | grep -oE 'version [0-9]+' | grep -oE '[0-9]+' | head -1)
+          if [ -z "$VERSION_NUMBER" ]; then
+            echo "::error::Could not parse version number from clasp output"
+            exit 1
+          fi
+          echo "version_number=$VERSION_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to stable production deployment ID
+        env:
+          DEPLOYMENT_ID: ${{ secrets.DEPLOYMENT_ID_PROD }}
+        run: |
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "::warning::DEPLOYMENT_ID_PROD not set — creating a NEW deployment instead of updating the stable one. Capture the new ID and add it as a secret to enable in-place updates."
+            npx clasp deploy -d "${{ steps.tag.outputs.tag }}"
+          else
+            npx clasp deploy \
+              -i "$DEPLOYMENT_ID" \
+              -V "${{ steps.version.outputs.version_number }}" \
+              -d "${{ steps.tag.outputs.tag }}"
+          fi
+
+      - name: Annotate run with version metadata
+        run: |
+          echo "### Production deploy" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | ${{ steps.tag.outputs.tag }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | ${{ steps.version.outputs.version_number }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | ${GITHUB_SHA} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$HOME/.clasprc.json" .clasp.json

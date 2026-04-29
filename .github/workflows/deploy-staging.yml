@@ -1,0 +1,82 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: clasp push + deploy → staging
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run quality gates
+        run: npm run ci
+
+      - name: Authenticate clasp
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::error::CLASPRC_JSON secret is not set"
+            exit 1
+          fi
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: Configure clasp project for staging
+        env:
+          SCRIPT_ID: ${{ secrets.SCRIPT_ID_STAGING }}
+        run: |
+          if [ -z "$SCRIPT_ID" ]; then
+            echo "::error::SCRIPT_ID_STAGING secret is not set"
+            exit 1
+          fi
+          cat > .clasp.json <<EOF
+          {
+            "scriptId": "$SCRIPT_ID",
+            "rootDir": "./src"
+          }
+          EOF
+
+      - name: Push source to staging
+        run: npx clasp push -f
+
+      - name: Tag a new version
+        id: version
+        run: |
+          OUTPUT=$(npx clasp version "Staging build ${GITHUB_SHA::7} on $(date -u +%Y-%m-%dT%H:%M:%SZ)")
+          echo "$OUTPUT"
+          # clasp prints "Created version 42." — extract the number
+          VERSION_NUMBER=$(echo "$OUTPUT" | grep -oE 'version [0-9]+' | grep -oE '[0-9]+' | head -1)
+          echo "version_number=$VERSION_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        run: |
+          npx clasp deploy \
+            -V "${{ steps.version.outputs.version_number }}" \
+            -d "develop@${GITHUB_SHA::7}"
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$HOME/.clasprc.json" .clasp.json

@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build / coverage output
+coverage/
+*.log
+
+# Clasp local state — environment-specific, generated in CI
+.clasp.json
+.clasprc.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env
+.env.*
+!.env.example

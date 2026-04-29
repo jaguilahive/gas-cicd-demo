@@ -1,0 +1,82 @@
+name: Rollback Production
+
+# Manually point the stable production deployment at a prior version.
+# Use after a bad deploy: find the version number in `clasp versions` output
+# (or in past run summaries of deploy-prod.yml) and feed it here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_number:
+        description: 'GAS version number to roll back to (e.g. 41)'
+        required: true
+        type: string
+      reason:
+        description: 'Why are we rolling back? (logged for audit trail)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: clasp deploy → previous version
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Authenticate clasp
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          chmod 600 "$HOME/.clasprc.json"
+
+      - name: Configure clasp project
+        env:
+          SCRIPT_ID: ${{ secrets.SCRIPT_ID_PROD }}
+        run: |
+          cat > .clasp.json <<EOF
+          {"scriptId": "$SCRIPT_ID", "rootDir": "./src"}
+          EOF
+
+      - name: Roll back deployment
+        env:
+          DEPLOYMENT_ID: ${{ secrets.DEPLOYMENT_ID_PROD }}
+        run: |
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "::error::DEPLOYMENT_ID_PROD secret is required for rollback (so the URL stays stable)"
+            exit 1
+          fi
+          npx clasp deploy \
+            -i "$DEPLOYMENT_ID" \
+            -V "${{ inputs.version_number }}" \
+            -d "ROLLBACK to v${{ inputs.version_number }}: ${{ inputs.reason }}"
+
+      - name: Annotate run
+        run: |
+          echo "### Rollback executed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Version: ${{ inputs.version_number }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Reason: ${{ inputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Triggered by: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f "$HOME/.clasprc.json" .clasp.json

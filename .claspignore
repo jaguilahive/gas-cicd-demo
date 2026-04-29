@@ -1,0 +1,9 @@
+# Push only src/* files. clasp uses .gitignore-style patterns
+# but with the added rule: list everything to ignore EXCEPT src/.
+
+**/**
+
+!appsscript.json
+!*.js
+!*.html
+!*.gs
